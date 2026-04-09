@@ -546,7 +546,7 @@ function setup_backup_test_environment {
   # Set USE_S3 based on environment
   readonly USE_S3="${USE_S3:-$( if [[ -n "${OKTETO_NAMESPACE+x}" ]]; then echo "true" ; else echo "false"; fi )}"
 
-  # Detect GCS from environment variables
+  # Detect GCS / Azure from environment variables
   detect_blobstore_provider
 
   # Set KNOBS based on which provider we're using

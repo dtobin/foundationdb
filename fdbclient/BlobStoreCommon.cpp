@@ -21,6 +21,7 @@
 #include "fdbclient/IBlobStore.h"
 #include "fdbclient/S3BlobStore.h"
 #include "GCSBlobStore.h"
+#include "fdbclient/AzureBlobStore.h"
 #include "fdbclient/Knobs.h"
 #include "flow/Hostname.h"
 #include "flow/IAsyncFile.h"
@@ -336,6 +337,7 @@ Reference<IBlobStoreEndpoint> IBlobStoreEndpoint::fromString(const std::string& 
 		std::string region;
 		std::string gcsProjectId;
 		std::string provider = "s3";
+		bool msSkAuth = false;
 
 		BlobKnobs knobs;
 		HTTP::Headers extraHeaders;
@@ -382,6 +384,11 @@ Reference<IBlobStoreEndpoint> IBlobStoreEndpoint::fromString(const std::string& 
 				continue;
 			}
 
+			if (name == "ms_sk_auth"_sr || name == "mska"_sr) {
+				msSkAuth = value.toString() != "0";
+				continue;
+			}
+
 			// See if the parameter is a knob
 			// First try setting a dummy value (all knobs are currently numeric) just to see if this parameter is
 			// known. If it is, then we will set it to a good value or throw below, so the dummy set has no bad
@@ -417,6 +424,12 @@ Reference<IBlobStoreEndpoint> IBlobStoreEndpoint::fromString(const std::string& 
 			    host.toString(), service.toString(), proxyHost, proxyPort, cred, gcsProjectId, knobs, extraHeaders);
 		}
 
+		if (provider == "azure") {
+			return makeReference<AzureBlobStoreEndpoint>(
+			    host.toString(), service.toString(), proxyHost, proxyPort, cred, msSkAuth, knobs, extraHeaders);
+		}
+
+		// Default to S3
 		return makeReference<S3BlobStoreEndpoint>(
 		    host.toString(), service.toString(), region, proxyHost, proxyPort, cred, knobs, extraHeaders);
 

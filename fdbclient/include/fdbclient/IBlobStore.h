@@ -92,7 +92,8 @@ struct BlobKnobs {
 			"BUILD_AWS_BACKUP is enabled.",
 			"enable_object_integrity_check (or eoic) Enable integrity check on GET requests (Default: false).",
 			"global_connection_pool (or gcp)       Enable shared connection pool between all blobstore instances.",
-			"provider (or p)                       Blob store provider: s3 (default) or gcs."
+			"provider (or p)                       Blob store provider: s3 (default), gcs, or azure.",
+			"ms_sk_auth (or mska)                  For Azure: use Shared Key auth instead of Bearer token."
 		};
 	}
 

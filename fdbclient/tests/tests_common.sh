@@ -363,15 +363,17 @@ function get_use_s3_default {
 }
 
 # Detect which blob store provider to use based on environment variables.
-# Sets USE_GCS global (USE_S3 must already be set).
+# Sets USE_GCS and USE_AZURE globals (USE_S3 must already be set).
 function detect_blobstore_provider {
   USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET:-}" && -n "${GCS_APPLICATION_TOKEN:-}" ]]; then echo "true"; else echo "false"; fi )"
   readonly USE_GCS
+  USE_AZURE="$( if [[ -n "${AZURE_STORAGE_ACCOUNT+x}" && -n "${AZURE_STORAGE_CONTAINER+x}" && -n "${AZURE_STORAGE_KEY+x}" ]]; then echo "true"; else echo "false"; fi )"
+  readonly USE_AZURE
 }
 
 # Common blobstore environment setup - shared across all blob store tests
-# Supports S3, GCS, and MockS3Server.
-# Prerequisites: USE_S3, USE_GCS, and TLS_CA_FILE must be set before calling this function
+# Supports S3, GCS, Azure, and MockS3Server.
+# Prerequisites: USE_S3, USE_GCS, USE_AZURE, and TLS_CA_FILE must be set before calling this function
 #   (use get_use_s3_default and setup_tls_ca_file)
 # $1 build directory, $2 scratch directory, $3 path prefix (used for temp dir naming)
 # Sets global variables: TEST_SCRATCH_DIR, host, bucket, region, blob_credentials_file, query_str
@@ -400,6 +402,31 @@ function setup_s3_environment {
     blob_credentials_file="${configs[2]}"
     region=""
     query_str="bucket=${bucket}&p=gcs&secure_connection=1"
+    export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
+    if [[ -n "${TLS_CA_FILE:-}" ]]; then
+      export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
+    fi
+
+  elif [[ "${USE_AZURE:-false}" == "true" ]]; then
+    log "Testing against Azure Blob Storage"
+    if ! source "${TESTS_COMMON_DIR}/azure_fixture.sh"; then
+      err "Failed to source azure_fixture.sh"
+      exit 1
+    fi
+    if ! TEST_SCRATCH_DIR=$( create_azure_dir "${local_scratch_dir}" ); then
+      err "Failed creating local azure_dir"
+      exit 1
+    fi
+    local azure_output
+    if ! azure_output=$(azure_setup "${local_build_dir}" "${TEST_SCRATCH_DIR}"); then
+      err "Failed azure_setup"
+      return 1
+    fi
+    local azure_account azure_host
+    IFS=$'\n' read -r -d '' azure_account azure_host bucket blob_credentials_file <<< "${azure_output}" || true
+    host="${azure_account}@${azure_host}"
+    region=""
+    query_str="bucket=${bucket}&p=azure&ms_sk_auth=1&secure_connection=1"
     export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
     if [[ -n "${TLS_CA_FILE:-}" ]]; then
       export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
@@ -462,9 +489,9 @@ function setup_s3_environment {
   readonly query_str
 }
 
-# Setup TLS CA file for cloud provider connections (S3, GCS)
+# Setup TLS CA file for cloud provider connections (S3, GCS, Azure)
 function setup_tls_ca_file {
-  if [[ "${USE_S3}" == "true" || "${USE_GCS:-false}" == "true" ]]; then
+  if [[ "${USE_S3}" == "true" || "${USE_GCS:-false}" == "true" || "${USE_AZURE:-false}" == "true" ]]; then
     # Try to find a valid TLS CA file if not explicitly set
     if [[ -z "${TLS_CA_FILE:-}" ]]; then
       # Common locations for TLS CA files on different systems
