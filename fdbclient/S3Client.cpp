@@ -119,11 +119,13 @@ AsyncResult<std::string> calculateFileChecksum(Reference<IAsyncFile> file, int64
 	}
 }
 
-// Get the endpoint for the given s3url.
-// Populates parameters and resource with parse of s3url.
-Reference<S3BlobStoreEndpoint> getEndpoint(const std::string& s3url,
-                                           std::string& resource,
-                                           S3BlobStoreEndpoint::ParametersT& parameters) {
+// Parse and validate a blobstore URL into a provider-appropriate endpoint (S3, GCS, or Azure).
+// Populates parameters and resource with the parse of s3url.
+// Commands that only use the IBlobStoreEndpoint interface (e.g. rm) should use this directly;
+// S3-specific commands should use getEndpoint() below, which additionally requires an S3 endpoint.
+Reference<IBlobStoreEndpoint> getBlobStoreEndpoint(const std::string& s3url,
+                                                   std::string& resource,
+                                                   IBlobStoreEndpoint::ParametersT& parameters) {
 	try {
 		std::string error;
 		Optional<std::string> proxy;
@@ -131,8 +133,8 @@ Reference<S3BlobStoreEndpoint> getEndpoint(const std::string& s3url,
 		if (res) {
 			proxy = *static_cast<Optional<std::string>*>(res);
 		}
-		Reference<S3BlobStoreEndpoint> endpoint =
-		    S3BlobStoreEndpoint::fromString(s3url, proxy, &resource, &error, &parameters);
+		Reference<IBlobStoreEndpoint> endpoint =
+		    IBlobStoreEndpoint::fromString(s3url, proxy, &resource, &error, &parameters);
 
 		if (!endpoint) {
 			TraceEvent(SevError, "S3ClientGetEndpointNullEndpoint").detail("URL", s3url).detail("Error", error);
@@ -169,6 +171,20 @@ Reference<S3BlobStoreEndpoint> getEndpoint(const std::string& s3url,
 		TraceEvent(SevError, "S3ClientGetEndpointFailed").detail("URL", StringRef(s3url)).detail("Error", e.what());
 		throw;
 	}
+}
+
+// Get the S3 endpoint for the given s3url. Throws backup_invalid_url if the URL names a non-S3
+// provider (e.g. "p=azure"), since callers of this rely on S3-specific endpoint methods.
+Reference<S3BlobStoreEndpoint> getEndpoint(const std::string& s3url,
+                                           std::string& resource,
+                                           S3BlobStoreEndpoint::ParametersT& parameters) {
+	Reference<IBlobStoreEndpoint> endpoint = getBlobStoreEndpoint(s3url, resource, parameters);
+	S3BlobStoreEndpoint* s3 = dynamic_cast<S3BlobStoreEndpoint*>(endpoint.getPtr());
+	if (!s3) {
+		TraceEvent(SevError, "S3ClientGetEndpointNotS3").detail("URL", s3url);
+		throw backup_invalid_url();
+	}
+	return Reference<S3BlobStoreEndpoint>::addRef(s3);
 }
 
 // Helper function to determine if an error is retryable
@@ -1028,8 +1044,10 @@ Future<Void> copyDownDirectory(std::string s3url, std::string dirpath) {
 
 Future<Void> deleteResource(std::string s3url) {
 	std::string resource;
-	S3BlobStoreEndpoint::ParametersT parameters;
-	Reference<S3BlobStoreEndpoint> endpoint = getEndpoint(s3url, resource, parameters);
+	IBlobStoreEndpoint::ParametersT parameters;
+	// rm only uses the IBlobStoreEndpoint interface (deleteRecursively), so it works for any
+	// provider (S3, GCS, Azure). Use the provider-agnostic endpoint rather than requiring S3.
+	Reference<IBlobStoreEndpoint> endpoint = getBlobStoreEndpoint(s3url, resource, parameters);
 	std::string bucket = parameters["bucket"];
 	co_await endpoint->deleteRecursively(bucket, resource);
 }

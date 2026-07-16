@@ -417,7 +417,13 @@ static Future<Void> writeEntireFileFromBuffer_impl(Reference<AzureBlobStoreEndpo
 	std::string resource = "/" + bucket + "/" + object;
 	HTTP::Headers headers;
 	headers["Content-Length"] = std::to_string(contentLen);
-	headers["Content-MD5"] = contentMD5;
+	// contentMD5 is computed by the caller (writeEntireFile_impl). It holds an MD5 when
+	// enable_object_integrity_check is disabled and a SHA-256 when it is enabled. Azure's
+	// Content-MD5 header only accepts a 128-bit MD5, so only volunteer it in the MD5 case.
+	// Azure Blob has no request header to validate a client-supplied SHA-256, so it is not sent.
+	if (!b->knobs.enable_object_integrity_check && !contentMD5.empty()) {
+		headers["Content-MD5"] = contentMD5;
+	}
 	headers["x-ms-blob-type"] = "BlockBlob";
 	addAzureEncryptionHeaders(headers, true /* isWriteRequest */);
 
@@ -501,7 +507,9 @@ static Future<std::string> uploadPart_impl(Reference<AzureBlobStoreEndpoint> b,
 
 	HTTP::Headers headers;
 	headers["Content-Length"] = std::to_string(contentLen);
-	if (!contentMD5.empty()) {
+	// See writeEntireFileFromBuffer_impl: contentMD5 is an MD5 only when integrity check is
+	// disabled; when enabled it is a SHA-256, which Azure's Content-MD5 header cannot accept.
+	if (!b->knobs.enable_object_integrity_check && !contentMD5.empty()) {
 		headers["Content-MD5"] = contentMD5;
 	}
 	addAzureEncryptionHeaders(headers, true /* isWriteRequest */);
