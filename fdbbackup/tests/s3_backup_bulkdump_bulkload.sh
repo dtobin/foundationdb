@@ -412,6 +412,19 @@ fi
 TEST_SCRATCH_DIR=
 readonly TAG="test_backup_bulkdump"
 
+# BulkDump/BulkLoad over blobstore is currently S3-only: the copy paths in S3Client.cpp
+# require an S3BlobStoreEndpoint and reject non-S3 URLs (e.g. p=azure) with backup_invalid_url,
+# so the bulkdump snapshot never completes. Disable Azure and Azurite for this test so that,
+# even in an Azure/Azurite-configured environment, it falls back to real S3 (if USE_S3=true)
+# or MockS3Server instead of hanging. This must happen before setup_backup_test_environment,
+# which calls detect_blobstore_provider and makes USE_AZURE/USE_AZURITE readonly.
+if [[ "${USE_AZURITE:-false}" == "true" \
+      || -n "${AZURE_STORAGE_ACCOUNT:-}${AZURE_STORAGE_KEY:-}${AZURE_STORAGE_CONTAINER:-}" ]]; then
+  log "BulkDump/BulkLoad is S3-only; ignoring Azure/Azurite provider selection for this test"
+fi
+USE_AZURITE=false
+unset AZURE_STORAGE_ACCOUNT AZURE_STORAGE_KEY AZURE_STORAGE_CONTAINER
+
 # Setup common environment (USE_S3, KNOBS, TLS_CA_FILE, clears HTTP_PROXY/HTTPS_PROXY)
 setup_backup_test_environment 2
 # Process command-line options.

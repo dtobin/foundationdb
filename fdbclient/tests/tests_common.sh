@@ -363,12 +363,17 @@ function get_use_s3_default {
 }
 
 # Detect which blob store provider to use based on environment variables.
-# Sets USE_GCS and USE_AZURE globals (USE_S3 must already be set).
+# Sets USE_GCS, USE_AZURE, and USE_AZURITE globals (USE_S3 must already be set).
+# GCS and Azure are inferred from their credential environment variables. Azurite (the Azure
+# Blob Storage emulator) ships with well-known default credentials, so it is opt-in via
+# USE_AZURITE=true. These flags are independent; setup_s3_environment picks the provider.
 function detect_blobstore_provider {
   USE_GCS="$( if [[ -n "${GCS_FDB_BUCKET:-}" && -n "${GCS_APPLICATION_TOKEN:-}" ]]; then echo "true"; else echo "false"; fi )"
   readonly USE_GCS
   USE_AZURE="$( if [[ -n "${AZURE_STORAGE_ACCOUNT+x}" && -n "${AZURE_STORAGE_CONTAINER+x}" && -n "${AZURE_STORAGE_KEY+x}" ]]; then echo "true"; else echo "false"; fi )"
   readonly USE_AZURE
+  USE_AZURITE="$( if [[ "${USE_AZURITE:-false}" == "true" ]]; then echo "true"; else echo "false"; fi )"
+  readonly USE_AZURITE
 }
 
 # Common blobstore environment setup - shared across all blob store tests
@@ -432,6 +437,31 @@ function setup_s3_environment {
       export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
     fi
 
+  elif [[ "${USE_AZURITE:-false}" == "true" ]]; then
+    log "Testing against Azurite (Azure Blob Storage emulator)"
+    if ! source "${TESTS_COMMON_DIR}/azurite_fixture.sh"; then
+      err "Failed to source azurite_fixture.sh"
+      exit 1
+    fi
+    if ! TEST_SCRATCH_DIR=$( create_azurite_dir "${local_scratch_dir}" ); then
+      err "Failed creating local azurite_dir"
+      exit 1
+    fi
+    local azurite_output
+    if ! azurite_output=$(azurite_setup "${local_build_dir}" "${TEST_SCRATCH_DIR}"); then
+      err "Failed azurite_setup"
+      return 1
+    fi
+    local azurite_account azurite_host azurite_secure
+    IFS=$'\n' read -r -d '' azurite_account azurite_host bucket blob_credentials_file azurite_secure <<< "${azurite_output}" || true
+    host="${azurite_account}@${azurite_host}"
+    region=""
+    query_str="bucket=${bucket}&p=azure&ms_sk_auth=1&secure_connection=${azurite_secure}"
+    export FDB_BLOB_CREDENTIALS="${blob_credentials_file}"
+    if [[ "${azurite_secure}" == "1" && -n "${TLS_CA_FILE:-}" ]]; then
+      export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
+    fi
+
   elif [[ "${USE_S3}" == "true" ]]; then
     log "Testing against s3"
     # Source AWS fixture (use TESTS_COMMON_DIR for reliable path resolution)
@@ -491,7 +521,10 @@ function setup_s3_environment {
 
 # Setup TLS CA file for cloud provider connections (S3, GCS, Azure)
 function setup_tls_ca_file {
-  if [[ "${USE_S3}" == "true" || "${USE_GCS:-false}" == "true" || "${USE_AZURE:-false}" == "true" ]]; then
+  # Azurite defaults to plain http (secure_connection=0), so it needs no TLS CA unless the
+  # user explicitly runs it over https via AZURITE_SECURE_CONNECTION=1.
+  if [[ "${USE_S3}" == "true" || "${USE_GCS:-false}" == "true" || "${USE_AZURE:-false}" == "true" \
+        || ( "${USE_AZURITE:-false}" == "true" && "${AZURITE_SECURE_CONNECTION:-0}" == "1" ) ]]; then
     # Try to find a valid TLS CA file if not explicitly set
     if [[ -z "${TLS_CA_FILE:-}" ]]; then
       # Common locations for TLS CA files on different systems
