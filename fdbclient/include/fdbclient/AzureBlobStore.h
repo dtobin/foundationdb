@@ -46,8 +46,10 @@ public:
 
 	Optional<Credentials> credentials;
 	bool sharedKeyAuth;
+	bool lookupSecret;
 
 	bool extractCredentialFields(JSONDoc& account) override;
+	bool lookupSecretOnEachRequest() override;
 	std::string getResourceURL(std::string resource, std::string params) const override;
 	void setRequestHeaders(std::string const& verb,
 	                       std::string const& resource,

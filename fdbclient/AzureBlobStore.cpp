@@ -24,9 +24,12 @@
 #include "fdbrpc/HTTP.h"
 #include "flow/Error.h"
 #include "flow/Trace.h"
+#include "flow/UnitTest.h"
 #include "flow/network.h"
 #include "flow/CoroUtils.h"
 #include <algorithm>
+#include <tuple>
+#include <vector>
 #include <boost/algorithm/string.hpp>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
@@ -104,7 +107,8 @@ AzureBlobStoreEndpoint::AzureBlobStoreEndpoint(std::string const& host,
                                                BlobKnobs const& knobs,
                                                HTTP::Headers extraHeaders)
   : IBlobStoreEndpoint(host, service, "auto", proxyHost, proxyPort, knobs, extraHeaders),
-    credentials(parseCredentials(creds)), sharedKeyAuth(sharedKeyAuth) {
+    credentials(parseCredentials(creds)), sharedKeyAuth(sharedKeyAuth),
+    lookupSecret(credentials.present() && credentials.get().secret.empty()) {
 	if (!credentials.present()) {
 		throw backup_auth_missing();
 	}
@@ -148,6 +152,10 @@ bool AzureBlobStoreEndpoint::extractCredentialFields(JSONDoc& account) {
 	return true;
 }
 
+bool AzureBlobStoreEndpoint::lookupSecretOnEachRequest() {
+	return lookupSecret;
+}
+
 std::string AzureBlobStoreEndpoint::getResourceURL(std::string resource, std::string params) const {
 	if (!params.empty())
 		params.append("&");
@@ -155,7 +163,25 @@ std::string AzureBlobStoreEndpoint::getResourceURL(std::string resource, std::st
 	if (sharedKeyAuth) {
 		params.append("&mska=1");
 	}
-	return IBlobStoreEndpoint::getResourceURL(resource, params);
+	std::string url = IBlobStoreEndpoint::getResourceURL(resource, params);
+
+	// Preserve credentials supplied directly in the URL so URLs returned by container discovery can be reopened.
+	// Secrets loaded from credential files are omitted to avoid baking refreshed credentials into serialized URLs.
+	std::string credentialsString;
+	if (credentials.present()) {
+		credentialsString = credentials.get().accountName;
+		if (!lookupSecret && !credentials.get().secret.empty()) {
+			credentialsString.append(":").append(credentials.get().secret);
+		}
+	}
+
+	const std::string placeholder = "blobstore://@";
+	size_t pos = url.find(placeholder);
+	if (pos != std::string::npos) {
+		url.replace(pos, placeholder.size(), "blobstore://" + credentialsString + "@");
+	}
+
+	return url;
 }
 
 static std::string getSharedKey(const AzureBlobStoreEndpoint::Credentials& creds,
@@ -765,4 +791,78 @@ static Future<Void> createBucket_impl(Reference<AzureBlobStoreEndpoint> b, std::
 
 Future<Void> AzureBlobStoreEndpoint::createBucket(std::string const& bucket) {
 	return createBucket_impl(Reference<AzureBlobStoreEndpoint>::addRef(this), bucket);
+}
+
+TEST_CASE("/backup/azure/getResourceURL/inlineCredentials") {
+	for (const auto& [credentials, authParams, expectedSecret, sharedKey] :
+	     std::vector<std::tuple<std::string, std::string, std::string, bool>>{
+	         { "account:c2VjcmV0LXRlc3Q=", "p=azure&mska=1", "c2VjcmV0LXRlc3Q=", true },
+	         { "account:bearer.token", "p=azure", "bearer.token", false },
+	     }) {
+		std::string resource;
+		std::string error;
+		IBlobStoreEndpoint::ParametersT parameters;
+		Reference<IBlobStoreEndpoint> endpoint = IBlobStoreEndpoint::fromString(
+		    "blobstore://" + credentials + "@account.blob.core.windows.net/original?bucket=b&" + authParams,
+		    {},
+		    &resource,
+		    &error,
+		    &parameters);
+		auto* azure = dynamic_cast<AzureBlobStoreEndpoint*>(endpoint.getPtr());
+		ASSERT(azure != nullptr);
+		ASSERT(!azure->lookupSecretOnEachRequest());
+
+		std::string serialized = azure->getResourceURL("next", "bucket=b");
+		ASSERT(serialized.starts_with("blobstore://" + credentials + "@account.blob.core.windows.net/next?"));
+
+		std::string reparsedResource;
+		std::string reparseError;
+		IBlobStoreEndpoint::ParametersT reparsedParameters;
+		Reference<IBlobStoreEndpoint> reparsed = IBlobStoreEndpoint::fromString(
+		    serialized, {}, &reparsedResource, &reparseError, &reparsedParameters);
+		auto* reparsedAzure = dynamic_cast<AzureBlobStoreEndpoint*>(reparsed.getPtr());
+		ASSERT(reparsedAzure != nullptr);
+		ASSERT(reparsedAzure->credentials.present());
+		ASSERT(reparsedAzure->credentials.get().accountName == "account");
+		ASSERT(reparsedAzure->credentials.get().secret == expectedSecret);
+		ASSERT(reparsedAzure->sharedKeyAuth == sharedKey);
+		ASSERT(!reparsedAzure->lookupSecretOnEachRequest());
+	}
+
+	return Void();
+}
+
+TEST_CASE("/backup/azure/getResourceURL/fileCredentialsRemainExternal") {
+	std::string resource;
+	std::string error;
+	IBlobStoreEndpoint::ParametersT parameters;
+	Reference<IBlobStoreEndpoint> endpoint = IBlobStoreEndpoint::fromString(
+	    "blobstore://account@account.blob.core.windows.net/original?bucket=b&p=azure&mska=1",
+	    {},
+	    &resource,
+	    &error,
+	    &parameters);
+	auto* azure = dynamic_cast<AzureBlobStoreEndpoint*>(endpoint.getPtr());
+	ASSERT(azure != nullptr);
+	ASSERT(azure->lookupSecretOnEachRequest());
+
+	// Simulate a credential-file refresh. The refreshed value must not be embedded in generated URLs.
+	azure->credentials.get().secret = "refreshed-secret";
+	std::string serialized = azure->getResourceURL("next", "bucket=b");
+	ASSERT(serialized.starts_with("blobstore://account@account.blob.core.windows.net/next?"));
+	ASSERT(serialized.find("refreshed-secret") == std::string::npos);
+
+	std::string reparsedResource;
+	std::string reparseError;
+	IBlobStoreEndpoint::ParametersT reparsedParameters;
+	Reference<IBlobStoreEndpoint> reparsed =
+	    IBlobStoreEndpoint::fromString(serialized, {}, &reparsedResource, &reparseError, &reparsedParameters);
+	auto* reparsedAzure = dynamic_cast<AzureBlobStoreEndpoint*>(reparsed.getPtr());
+	ASSERT(reparsedAzure != nullptr);
+	ASSERT(reparsedAzure->credentials.present());
+	ASSERT(reparsedAzure->credentials.get().accountName == "account");
+	ASSERT(reparsedAzure->credentials.get().secret.empty());
+	ASSERT(reparsedAzure->lookupSecretOnEachRequest());
+
+	return Void();
 }
