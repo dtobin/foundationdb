@@ -38,28 +38,6 @@
 
 constexpr const char* AZURE_API_VERSION = "2021-08-06";
 
-// URL decode a string (for canonicalizing query parameters in signatures)
-static std::string urlDecode(const std::string& encoded) {
-	std::string result;
-	result.reserve(encoded.size());
-	for (size_t i = 0; i < encoded.size(); i++) {
-		if (encoded[i] == '%' && i + 2 < encoded.size()) {
-			int value;
-			if (sscanf(encoded.substr(i + 1, 2).c_str(), "%x", &value) == 1) {
-				result += static_cast<char>(value);
-				i += 2;
-			} else {
-				result += encoded[i];
-			}
-		} else if (encoded[i] == '+') {
-			result += ' ';
-		} else {
-			result += encoded[i];
-		}
-	}
-	return result;
-}
-
 static std::string sha256_base64(const std::string& data) {
 	unsigned char hash[SHA256_DIGEST_LENGTH];
 	SHA256_CTX sha256;
@@ -208,7 +186,7 @@ static std::string getSharedKey(const AzureBlobStoreEndpoint::Credentials& creds
 				std::string key = queryString.substr(start, eq - start);
 				std::string value = queryString.substr(eq + 1, amp - eq - 1);
 				// URL-decode the value for canonical resource (Azure requires decoded values in signature)
-				params.push_back({ boost::to_lower_copy(key), urlDecode(value) });
+				params.push_back({ boost::to_lower_copy(key), HTTP::urlDecode(value) });
 			}
 			start = amp + 1;
 		}
